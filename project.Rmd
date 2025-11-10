@@ -1,0 +1,374 @@
+---
+title: "Project"
+output: 
+  html_document:
+    css: style.css
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(e1071)
+knitr::opts_chunk$set(echo = TRUE)
+data <- read.csv('train.csv')
+```
+
+# **Step 1 : Cleaning and Preparation**
+
+```{r, echo = FALSE}
+
+# Remplacement des NA textuels par "None" pour signifier l'absence d'information
+data$Alley[is.na(data$Alley)] <- "None"
+data$BsmtQual[is.na(data$BsmtQual)] <- "None"
+data$BsmtCond[is.na(data$BsmtCond)] <- "None"
+data$BsmtExposure[is.na(data$BsmtExposure)] <- "None"
+data$BsmtFinType1[is.na(data$BsmtFinType1)] <- "None"
+data$BsmtFinType2[is.na(data$BsmtFinType2)] <- "None"
+
+data$FireplaceQu[is.na(data$FireplaceQu)] <- "None"
+data$GarageType[is.na(data$GarageType)] <- "None"
+data$GarageFinish[is.na(data$GarageFinish)] <- "None"
+
+data$GarageQual[is.na(data$GarageQual)] <- "None"
+data$GarageCond[is.na(data$GarageCond)] <- "None"
+data$Fence[is.na(data$Fence)] <- "None"
+data$MiscFeature[is.na(data$MiscFeature)] <- "None"
+data$PoolQC[is.na(data$PoolQC)] <- "None"
+
+# on va regarder si nos valeurs sont symétrique ou asymétrique, interpretation : Skewness	Interprétation : 
+# ≈ 0	Symétrique
+# > 0	Asymétrie à droite
+# < 0	Asymétrie à gauche
+# > 1 ou < -1	Forte asymétrie
+skewness(data$LotFrontage, na.rm = TRUE)
+
+
+# On obtient une valeur supérieur a 1 donc il ya une forte asymétrie donc on va imputer par médiane
+
+# --- 1. Identifier les colonnes avec des NA ---
+colSums(is.na(data))  # te montre combien de NA par colonne
+
+na_before <- colSums(is.na(data))
+na_before[na_before > 0]  # affiche seulement les colonnes concernées avant imputation
+
+# il y a les colonnes suivantes à modifier : 
+# LotFrontage : Linear feet of street connected to property | on peut faire la médiane | on va faire la médiane donc on ne touche a rien
+# MasVnrType : Masonry veneer type | on peut faire le mode ou alors mettre None | il y a bcp de None on applqiue le MODE
+
+mode_value <- names(sort(table(data$MasVnrType), decreasing = TRUE))[1]
+mode_value
+
+# MasVnrArea : Masonry veneer area in square feet | C'est un numérique avec 80% de 0 | on va donc mettre le mode (0)
+
+
+mode_value <- names(sort(table(data$MasVnrArea), decreasing = TRUE))[1]
+mode_value
+
+# la valeur la plus fréquente est un 0 donc on va mettre 0 pour MasVnrArea
+data$MasVnrArea[is.na(data$MasVnrArea)] <- mode_value
+
+# Electrical : Electrical system | Il y a 1 cas donc on peut supprimer la ligne ou alors regarder les donner et voir la plus utilisé ou mettre mixed
+
+mode_value <- names(sort(table(data$Electrical), decreasing = TRUE))[1]
+mode_value
+data$Electrical[is.na(data$Electrical)] <- mode_value
+
+# GarageYrBlt : Year garage was built | On peut pas les supprimer il y en as trop, 2005 ressort du lot mais peu, on va faire la méthode par default : médiane
+
+# --- 2. Sélectionner uniquement les colonnes numériques ---
+num_cols <- sapply(data, is.numeric)
+
+# --- 3. Remplacer les NA par la médiane dans ces colonnes ---
+for (col in names(data)[num_cols]) {
+  if (any(is.na(data[[col]]))) {  # s'il y a des NA dans cette colonne
+    median_value <- median(data[[col]], na.rm = TRUE)
+    data[[col]][is.na(data[[col]])] <- median_value
+  }
+}
+
+na_after <- colSums(is.na(data))
+print(na_after[na_after > 0])  # devrait afficher rien du tout (0 NA)
+
+
+# --- Imputation du mode pour les colonnes catégorielles ---
+cat_cols <- !num_cols  # l'inverse des colonnes numériques
+
+for (col in names(data)[cat_cols]) {
+  if (any(is.na(data[[col]]))) {
+    mode_value <- names(sort(table(data[[col]]), decreasing = TRUE))[1]
+    data[[col]][is.na(data[[col]])] <- mode_value
+  }
+}
+
+# --- 4. Vérification ---
+colSums(is.na(data))  # doit maintenant afficher que des 0
+
+# Vérifier skewness avant
+#library(e1071)
+#skewness(data$SalePrice, na.rm = TRUE)
+
+# Visualiser
+#hist(data$SalePrice, breaks = 40, main = "SalePrice (raw)")
+
+# Transformer, Prendre le log réduit l’asymétrie, stabilise la variance et aide beaucoup les modèles de régression linéaire.
+data$SalePrice_log <- log(data$SalePrice)
+
+# Vérifier après
+#skewness(data$SalePrice_log, na.rm = TRUE)
+#hist(data$SalePrice_log, breaks = 40, main = "SalePrice (log)")
+
+# On va combiner les surfaces des différents niveaux et du sous-sol
+data$TotalSF <- data$TotalBsmtSF + data$X1stFlrSF + data$X2ndFlrSF
+hist(data$TotalSF, breaks = 40, main = "Distribution de TotalSF")
+
+cor(data$TotalSF, data$SalePrice, use = "complete.obs")
+
+# Comme SalePrice est également très asymétrique, on applique le log pour le normaliser
+data$SalePrice_log <- log(data$SalePrice)
+hist(data$SalePrice_log, breaks = 40, main = "Distribution de log(SalePrice)")
+
+# On crée la variable d'âge
+data$HouseAge <- data$YrSold - data$YearBuilt
+hist(data$HouseAge, breaks = 40, main = "Distribution de HouseAge")
+
+# On crée la variable pour la dernière rénovation
+data$RemodAge <- data$YrSold - data$YearRemodAdd
+```
+
+# **Step 2 : Encodage et normalisation**
+
+```{r, ECHO = FALSE}
+
+# 1. Définition des mappings ----
+#Mapping des variables ordinales selon leur ordre logique
+
+qual_map <- c("None"=0, "Po"=1, "Fa"=2, "TA"=3, "Gd"=4, "Ex"=5)
+
+bsmt_exposure_map <- c("None"=0, "No"=1, "Mn"=2, "Av"=3, "Gd"=4)
+
+bsmtfin_map <- c("None"=0, "Unf"=1, "LwQ"=2, "Rec"=3, "BLQ"=4, "ALQ"=5, "GLQ"=6)
+
+pool_map <- c("None"=0, "Fa"=1, "TA"=2, "Gd"=3, "Ex"=4)
+
+fence_map <- c("None"=0, "MnWw"=1, "GdWo"=2, "MnPrv"=3, "GdPrv"=4)
+
+functional_map <- c("Sal"=1, "Sev"=2, "Maj2"=3, "Maj1"=4, "Mod"=5, "Min2"=6, "Min1"=7, "Typ"=8)
+
+landslope_map <- c("Sev"=1, "Mod"=2, "Gtl"=3)
+
+paveddrive_map <- c("N"=0, "P"=1, "Y"=2)
+
+# 2. Application des mappings ----
+
+# Ici on appplique les fonctions crée précédement afin de pouvoir tout utiler dans nos modèles phase 4. 
+
+# Qualités générales (même échelle)
+data$ExterQual_num   <- qual_map[data$ExterQual]
+data$ExterCond_num   <- qual_map[data$ExterCond]
+data$BsmtQual_num    <- qual_map[data$BsmtQual]
+data$BsmtCond_num    <- qual_map[data$BsmtCond]
+data$HeatingQC_num   <- qual_map[data$HeatingQC]
+data$KitchenQual_num <- qual_map[data$KitchenQual]
+data$FireplaceQu_num <- qual_map[data$FireplaceQu]
+data$GarageQual_num  <- qual_map[data$GarageQual]
+data$GarageCond_num  <- qual_map[data$GarageCond]
+
+# Sous-sol : exposition et finition
+data$BsmtExposure_num  <- bsmt_exposure_map[data$BsmtExposure]
+data$BsmtFinType1_num  <- bsmtfin_map[data$BsmtFinType1]
+data$BsmtFinType2_num  <- bsmtfin_map[data$BsmtFinType2]
+
+# Piscine et clôture
+data$PoolQC_num  <- pool_map[data$PoolQC]
+data$Fence_num   <- fence_map[data$Fence]
+
+# Autres variables ordinales
+data$Functional_num <- functional_map[data$Functional]
+data$LandSlope_num  <- landslope_map[data$LandSlope]
+data$PavedDrive_num <- paveddrive_map[data$PavedDrive]
+
+# 3. Vérification du résultat ----
+ordinals_created <- grep("_num$", names(data), value = TRUE)
+summary(data[, ordinals_created])
+
+
+data$HouseAge <- data$YrSold - data$YearBuilt
+data$RemodAge <- data$YrSold - data$YearRemodAdd  # 0 si jamais rénové (ou =YearBuilt si pas)
+# Option: mois de vente
+data$SaleMonth <- data$MoSold
+
+# Sélectionner toutes les colonnes numériques
+numeric_cols <- sapply(data, is.numeric)
+numeric_names <- names(data)[numeric_cols]
+
+# Vérifier les colonnes sélectionnées
+print(numeric_names)
+
+# On retire la colonne cible "SalePrice" ou "SalePrice_log" du scaling
+numeric_names <- setdiff(numeric_names, c("SalePrice", "SalePrice_log"))
+
+# Normalisation (centrage-réduction)
+# Chaque variable aura une moyenne = 0 et un écart-type = 1
+data[numeric_names] <- scale(data[numeric_names])
+
+# Vérification du résultat
+#summary(data[numeric_names])
+
+# Visualisation optionnelle : boîte à moustaches pour vérifier les échelles
+#boxplot(data[, numeric_names], main = "Variables numériques normalisées", las = 2)
+```
+
+# **Step 3 : Visualisation et exploration**
+
+```{r, ECHO = FALSE}
+
+library(ggplot2)
+
+# Calcul des corrélations numériques afin de voir ce qui influence le prix
+num_cols <- sapply(data, is.numeric)
+corrs <- cor(data[, num_cols], use = "pairwise.complete.obs")
+
+# Trier les 15 variables les plus corrélées avec le prix
+corr_saleprice <- sort(corrs[,"SalePrice"], decreasing = TRUE)[2:16] # [1] est SalePrice lui-même
+corr_df <- data.frame(Feature = names(corr_saleprice), Correlation = corr_saleprice)
+
+# Barplot
+ggplot(corr_df, aes(x = reorder(Feature, Correlation), y = Correlation)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 15 variables les plus corrélées avec SalePrice",
+       x = "Variables", y = "Corrélation")
+
+
+ggplot(data, aes(x = factor(OverallQual), y = SalePrice)) +
+  geom_boxplot(fill = "skyblue") +
+  labs(title = "Distribution de SalePrice selon OverallQual",
+       x = "Qualité générale", y = "Prix de vente")
+
+
+ggplot(data, aes(x = Neighborhood, y = SalePrice)) +
+  geom_boxplot(fill = "orange") +
+  coord_flip() +
+  labs(title = "Prix de vente par quartier",
+       x = "Quartier", y = "Prix de vente")
+
+
+ggplot(data, aes(x = TotalSF, y = SalePrice, color = factor(OverallQual))) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Relation entre la surface totale et le prix",
+       x = "Surface totale (TotalSF)", y = "Prix de vente", color = "Qualité globale")
+
+
+ggplot(data, aes(x = SalePrice_log)) +
+  geom_histogram(bins = 40, fill = "purple", color = "white") +
+  labs(title = "Distribution du log(SalePrice)", x = "log(SalePrice)", y = "Fréquence")
+
+ggplot(data, aes(x = HouseAge, y = SalePrice)) +
+  geom_point(alpha = 0.6, color = "forestgreen") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Effet de l'âge de la maison sur le prix",
+       x = "Âge de la maison (HouseAge)", y = "Prix de vente")
+```
+
+# **Step 4 : Modélisation et prédiction**
+
+```{r, ECHO = FALSE}
+# On crée un échantillon d’apprentissage et de test pour évaluer nos modèles.
+set.seed(123)
+library(caret)
+
+# Séparation train/test (80/20)
+trainIndex <- createDataPartition(data$SalePrice_log, p = 0.8, list = FALSE)
+train <- data[trainIndex, ]
+test  <- data[-trainIndex, ]
+
+# On utilise les variables les plus corrélées (par exemple : OverallQual, TotalSF, GarageCars, GrLivArea, YearBuilt).
+# Régression linéaire simple
+lm_model <- lm(SalePrice_log ~ OverallQual + TotalSF + GarageCars + GrLivArea + YearBuilt, data = train)
+
+summary(lm_model)
+
+# Prédictions sur test
+pred_lm <- predict(lm_model, newdata = test)
+
+# Revenir sur l’échelle originale (exp car on avait pris le log)
+pred_lm_real <- exp(pred_lm)
+real_values <- test$SalePrice
+
+# Évaluer les erreurs
+rmse_lm <- sqrt(mean((pred_lm_real - real_values)^2))
+mae_lm  <- mean(abs(pred_lm_real - real_values))
+cat("Linear Regression - RMSE:", rmse_lm, " MAE:", mae_lm, "\n")
+
+
+# LASSO = Linear regression + pénalisation L1 on garde seulement les variables les plus importantes :
+
+library(glmnet)
+
+# 1) Garder uniquement les colonnes numériques
+numeric_cols <- sapply(train, is.numeric)
+train_num <- train[, numeric_cols]
+test_num  <- test[, numeric_cols]
+
+# 2) Séparer X et Y
+x_train <- as.matrix(train_num[, colnames(train_num) != "SalePrice_log"])
+y_train <- train_num$SalePrice_log
+
+x_test  <- as.matrix(test_num[, colnames(test_num) != "SalePrice_log"])
+y_test  <- test_num$SalePrice_log
+
+# 3) LASSO CV
+library(glmnet)
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1)
+
+best_lambda <- lasso_model$lambda.min
+
+# 4) Prédictions
+pred_lasso <- predict(lasso_model, s = best_lambda, newx = x_test)
+pred_lasso_real <- exp(pred_lasso)
+
+# 5) Évaluation
+rmse_lasso <- sqrt(mean((pred_lasso_real - exp(y_test))^2))
+mae_lasso  <- mean(abs(pred_lasso_real - exp(y_test)))
+
+cat("LASSO Regression - RMSE:", rmse_lasso, " MAE:", mae_lasso)
+
+# seules les variables dont le coefficient ≠ 0 sont conservées par LASSO.
+
+#Modèle robuste, non linéaire, gère très bien les interactions entre variables.
+install.packages("randomForest")
+library(randomForest)
+
+rf_model <- randomForest(SalePrice_log ~ OverallQual + TotalSF + GarageCars + GrLivArea + YearBuilt, 
+                         data = train, importance = TRUE, ntree = 500)
+
+pred_rf <- predict(rf_model, newdata = test)
+pred_rf_real <- exp(pred_rf)
+
+# Évaluation
+rmse_rf <- sqrt(mean((pred_rf_real - real_values)^2))
+mae_rf  <- mean(abs(pred_rf_real - real_values))
+cat("Random Forest - RMSE:", rmse_rf, " MAE:", mae_rf, "\n")
+
+# Importance des variables
+importance(rf_model)
+varImpPlot(rf_model)
+
+
+results <- data.frame(
+  Model = c("Linear Regression", "LASSO Regression", "Random Forest"),
+  RMSE = c(rmse_lm, rmse_lasso, rmse_rf),
+  MAE  = c(mae_lm, mae_lasso, mae_rf)
+)
+print(results)
+
+# Visualisation
+library(ggplot2)
+ggplot(results, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Comparaison des performances des modèles", y = "RMSE (plus bas = mieux)")
+```
