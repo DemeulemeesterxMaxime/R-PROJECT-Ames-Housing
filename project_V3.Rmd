@@ -75,6 +75,13 @@ data[[col]][is.na(data[[col]])] <- mode_value
 
 colSums(is.na(data))
 
+```
+
+# **Step 2 : Encodage et normalisation**
+
+```{r, ECHO = FALSE}
+
+
 # Transformation logarithmique du prix de vente
 
 # Justification : la distribution de SalePrice est très asymétrique (à droite)
@@ -96,11 +103,8 @@ data$HouseAge <- data$YrSold - data$YearBuilt
 # RemodAge = temps depuis la dernière rénovation
 
 data$RemodAge <- data$YrSold - data$YearRemodAdd
-```
 
-# **Step 2 : Encodage et normalisation**
 
-```{r, ECHO = FALSE}
 # Les variables ordinales (qualitatives ordonnées) sont converties en valeurs numériques cohérentes.
 
 # Justification : les modèles de régression (LASSO, linéaire) nécessitent des valeurs continues.
