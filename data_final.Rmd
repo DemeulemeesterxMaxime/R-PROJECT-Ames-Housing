@@ -1,0 +1,640 @@
+---
+title: "Ames Housing Price Prediction Project"
+author: "Gibaru Lamour Demeulemeester "
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+
+
+
+
+<style>
+body {
+  background-color: #f0f0f0;
+}
+h1, h2, h3 {
+  color: darkred;
+  font-family: "Courier New";
+}
+.instruction-box {
+  background-color: #e8f4f8;
+  border-left: 5px solid #2196F3;
+  padding: 15px;
+  margin: 20px 0;
+  font-style: italic;
+}
+.analysis-box {
+  background-color: #f9f9f9;
+  border-left: 4px solid #444;
+  padding: 15px 20px;
+  margin: 20px 0;
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #333;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+</style>
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(ggplot2)
+library(glmnet)
+library(randomForest)
+library(tidyr)
+
+```
+
+# Project
+
+**Goal:** As analysts for a real estate agency, develop a model to predict the sale price of homes in Ames, Iowa.
+
+<a href="https://github.com/DemeulemeesterxMaxime/R-PROJECT-Ames-Housing" target="_blank">
+  <img src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png" alt="GitHub" width="30"/> View on GitHub</a>
+<br><br>
+
+<a href="https://www.kaggle.com/c/house-prices-advanced-regression-techniques" target="_blank">
+  <img src="https://www.kaggle.com/static/images/site-logo.png" alt="Kaggle" width="80"/> View Dataset
+</a>
+<br><br>
+
+# Step 1: Data Cleaning and Preparation
+
+<div class="instruction-box">
+**Instructions from Professor:**
+
+- Handle NA values by examining the meta-data and applying proper operations based on column nature
+- Identify columns where the vast majority of values are the same and consider removing them
+- **Outlier Detection:** Create a scatter plot of GrLivArea vs. SalePrice and identify outliers to remove
+</div>
+
+## Data Import
+
+```{r imports}
+train_data <- read.csv('train.csv', sep = ',', header = TRUE, stringsAsFactors = FALSE)
+test_data <- read.csv('test.csv', sep = ',', header = TRUE, stringsAsFactors = FALSE)
+```
+
+<div class="analysis-box">
+**Analysis:** loaded training dataset
+</div>
+
+
+
+```{r, include=FALSE}
+## Dataset Summary
+summary(train_data)
+```
+
+
+## Missing Values Analysis
+
+```{r}
+cols_with_na <- colnames(train_data)[colSums(is.na(train_data)) > 0]
+cat("Columns with missing values:\n",cols_with_na)
+cat("Total columns with NA:", length(cols_with_na))
+```
+
+<div class="analysis-box">
+**Analysis:** We identified `r length(cols_with_na)` columns containing missing values. According to the dataset documentation, some NA values represent the absence of a feature (e.g., no pool, no garage) rather than missing data. We handled MasVnrArea by replacing NA with 0, as the absence of masonry veneer means 0 square feet.
+</div>
+
+```{r}
+train_data$MasVnrArea[is.na(train_data$MasVnrArea)] <- 0
+```
+
+## Outlier Detection and Removal
+
+```{r}
+ggplot(data = train_data, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  labs(title = "Sale Price vs. Above Ground Living Area",
+       x = "Above Ground Living Area",
+       y = "Sale Price") +
+  theme_minimal()
+```
+
+<div class="analysis-box">
+**Analysis:** The scatter plot reveals several extreme outliers, houses with very large living areas (>4,000 sq ft) but unexpectedly low sale prices. These anomalies could distort our predictive models and should be removed.
+</div>
+
+```{r}
+# Calculate mean and standard deviation for filtering
+sale_mean <- mean(train_data$SalePrice, na.rm = TRUE)
+sale_sd <- sd(train_data$SalePrice, na.rm = TRUE)
+area_mean <- mean(train_data$GrLivArea, na.rm = TRUE)
+area_sd <- sd(train_data$GrLivArea, na.rm = TRUE)
+
+# Filter outliers within 2 standard deviations, meaning we removed 4.6% of the values.
+train_data_filtered <- train_data %>% filter(SalePrice > (sale_mean - 2*sale_sd) & SalePrice < (sale_mean + 2*sale_sd) & GrLivArea > (area_mean - 2*area_sd) & GrLivArea < (area_mean + 2*area_sd))
+```
+
+```{r}
+ggplot(data = train_data_filtered, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(alpha = 0.6, color = "darkgreen") +
+  labs(title = "Sale Price vs. Above Ground Living Area after Outlier Removal",
+       x = "Above Ground Living Area",
+       y = "Sale Price") +
+  theme_minimal()
+```
+
+<div class="analysis-box">
+**Analysis:** After removing extreme values using a 2-standard-deviation rule, the relationship between living area and sale price is now more clearly positive.
+</div>
+
+---
+```{r,echo=FALSE}
+cat("Number of rows in training data before removing extreme values:", NROW(train_data), "\n")
+cat("Number of rows in training data after removing extreme values:", NROW(train_data_filtered))
+```
+<div class="analysis-box">
+**Analysis:** So we removed 98 houses with that outlier detection.
+</div>
+
+
+# Step 2: Feature Transformation and Engineering
+
+<div class="instruction-box">
+**Instructions from Professor:**
+
+- **Logarithmic Transformation:** Apply log transformation to SalePrice to normalize its skewed distribution
+- **Creating Surface Area Features:** Create a TotalSF feature for total house area
+- **Encoding Ordinal Variables:** Convert ordinal categorical features to numerical variables
+- **Creating Temporal Features:** Create a HouseAge variable
+</div>
+
+## Logarithmic Transformation of Sale Price
+
+```{r}
+# Display original SalePrice distribution
+train_data_filtered_select <- train_data_filtered %>% select(SalePrice)
+cat("Original SalePrice statistics:\n")
+cat("Mean:", mean(train_data_filtered$SalePrice), "\n")
+cat("Median:", median(train_data_filtered$SalePrice), "\n")
+cat("Skewness: Right-skewed distribution\n\n")
+
+# Apply log transformation
+train_data_filtered <- train_data_filtered %>%
+  filter(SalePrice > 0) %>%
+  mutate(SalePrice = log10(SalePrice))
+
+cat("Log-transformed SalePrice statistics:\n")
+cat("Mean:", mean(train_data_filtered$SalePrice), "\n")
+cat("Median:", median(train_data_filtered$SalePrice), "\n")
+```
+
+<div class="analysis-box">
+**Analysis:** The logarithmic transformation successfully normalized the SalePrice distribution.
+</div>
+
+## Creating Total Surface Area Feature
+
+```{r}
+train_data_filtered <- train_data_filtered %>% 
+  mutate(TotalSF = TotalBsmtSF + X1stFlrSF + X2ndFlrSF)
+
+cat("TotalSF feature created successfully\n")
+cat("Range:", range(train_data_filtered$TotalSF), "\n")
+cat("Mean:", mean(train_data_filtered$TotalSF), "sq ft\n")
+```
+
+<div class="analysis-box">
+**Analysis:** Created TotalSF by combining basement, first floor, and second floor areas.
+</div>
+
+## Creating Temporal Features
+```{r}
+# HouseAge = âge de la maison lors de la vente
+
+train_data_filtered$HouseAge <- train_data_filtered$YrSold - train_data_filtered$YearBuilt
+
+# RemodAge = temps depuis la dernière rénovation
+
+train_data_filtered$RemodAge <- train_data_filtered$YrSold - train_data_filtered$YearRemodAdd
+```
+
+<div class="analysis-box">
+**Analysis:** It creates two new variables indicating the age of the house at the time of sale and the time since the last renovation. These features provide more informative measures of property condition and modernization than the raw construction and renovation years.
+</div>
+
+## Encoding Ordinal Variables
+
+```{r}
+# Define quality mappings
+qual_map <- c("None"=0, "Po"=1, "Fa"=2, "TA"=3, "Gd"=4, "Ex"=5)
+bsmt_exposure_map <- c("None"=0, "No"=1, "Mn"=2, "Av"=3, "Gd"=4)
+bsmtfin_map <- c("None"=0, "Unf"=1, "LwQ"=2, "Rec"=3, "BLQ"=4, "ALQ"=5, "GLQ"=6)
+pool_map <- c("None"=0, "Fa"=1, "TA"=2, "Gd"=3, "Ex"=4)
+fence_map <- c("None"=0, "MnWw"=1, "GdWo"=2, "MnPrv"=3, "GdPrv"=4)
+functional_map <- c("Sal"=1, "Sev"=2, "Maj2"=3, "Maj1"=4, "Mod"=5, "Min2"=6, "Min1"=7, "Typ"=8)
+landslope_map <- c("Sev"=1, "Mod"=2, "Gtl"=3)
+paveddrive_map <- c("N"=0, "P"=1, "Y"=2)
+
+# Apply mappings
+train_data_filtered$ExterQual_num <- qual_map[train_data_filtered$ExterQual]
+train_data_filtered$ExterCond_num <- qual_map[train_data_filtered$ExterCond]
+train_data_filtered$BsmtQual_num <- qual_map[train_data_filtered$BsmtQual]
+train_data_filtered$BsmtCond_num <- qual_map[train_data_filtered$BsmtCond]
+train_data_filtered$HeatingQC_num <- qual_map[train_data_filtered$HeatingQC]
+train_data_filtered$KitchenQual_num <- qual_map[train_data_filtered$KitchenQual]
+train_data_filtered$FireplaceQu_num <- qual_map[train_data_filtered$FireplaceQu]
+train_data_filtered$GarageQual_num <- qual_map[train_data_filtered$GarageQual]
+train_data_filtered$GarageCond_num <- qual_map[train_data_filtered$GarageCond]
+train_data_filtered$BsmtExposure_num <- bsmt_exposure_map[train_data_filtered$BsmtExposure]
+train_data_filtered$BsmtFinType1_num <- bsmtfin_map[train_data_filtered$BsmtFinType1]
+train_data_filtered$BsmtFinType2_num <- bsmtfin_map[train_data_filtered$BsmtFinType2]
+train_data_filtered$PoolQC_num <- pool_map[train_data_filtered$PoolQC]
+train_data_filtered$Fence_num <- fence_map[train_data_filtered$Fence]
+train_data_filtered$Functional_num <- functional_map[train_data_filtered$Functional]
+train_data_filtered$LandSlope_num <- landslope_map[train_data_filtered$LandSlope]
+train_data_filtered$PavedDrive_num <- paveddrive_map[train_data_filtered$PavedDrive]
+
+cat("Ordinal variables successfully encoded to numerical format\n")
+cat("Total ordinal features converted:", 17, "\n")
+```
+
+<div class="analysis-box">
+**Analysis:** Converted 17 ordinal categorical variables into numerical scales that preserve their inherent ordering. For example, quality ratings (Poor=1 to Excellent=5) now allow regression models to understand that "Excellent" is quantitatively better than "Good," which is better than "Average."
+</div>
+
+## Feature Normalization
+
+```{r}
+# Normalize numeric features (excluding target variables)
+numeric_cols <- sapply(train_data_filtered, is.numeric)
+numeric_names <- setdiff(names(train_data_filtered)[numeric_cols],c("SalePrice", "SalePrice_log"))
+train_data_filtered[numeric_names] <- scale(train_data_filtered[numeric_names])
+
+```
+
+<div class="analysis-box">
+**Analysis:** Applied standardization to all numeric features. This ensures all variables are on the same scale (mean=0, sd=1), preventing features with larger magnitudes from dominating the model.
+</div>
+
+---
+
+# Step 3: Visualization and Exploration
+
+<div class="instruction-box">
+**Instructions from Professor:**
+
+- Calculate correlation of all numerical variables with SalePrice and visualize top 15
+- Use box plots to show relationship between OverallQual and SalePrice
+- Create box plots comparing SalePrice across different Neighborhoods
+- Make scatter plot of SalePrice vs. TotalSF, colored by OverallQual
+- Add 2 additional pertinent visualizations
+</div>
+
+## Top 15 Features Correlated with Sale Price
+
+```{r}
+numeric_vars <- sapply(train_data, is.numeric)
+train_numeric <- train_data[, numeric_vars]
+correlations <- cor(train_numeric, use = "pairwise.complete.obs")
+cor_with_price <- correlations[, "SalePrice"]
+top_corr <- sort(abs(cor_with_price), decreasing = TRUE)[1:15]
+
+corr_df <- data.frame(
+  Feature = names(top_corr),
+  Correlation = top_corr
+)
+
+ggplot(corr_df, aes(x = reorder(Feature, Correlation), y = Correlation)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 15 Features Most Correlated with Sale Price",
+       x = "Features",
+       y = "Correlation (Absolute Value)") +
+  theme_minimal()
+```
+
+<div class="analysis-box">
+**Analysis:** The correlation analysis identifies OverallQual, GrLivArea, GarageCars, GarageArea, and TotalBsmtSF as the top predictors. These features will be prioritized in our predictive models. Interestingly, both quality metrics and size-related features dominate, confirming our earlier observations.
+</div>
+
+## Impact of Overall Quality on Sale Price
+
+```{r}
+ggplot(train_data_filtered, aes(x = factor(OverallQual), y = SalePrice)) +
+  geom_boxplot(fill = "skyblue", color = "black") +
+  labs(title = "Impact of Overall Quality on Sale Price",
+       x = "Overall Quality Rating",
+       y = "Sale Price (Log Scale)") +
+  theme_minimal()
+```
+
+<div class="analysis-box">
+**Analysis:** There is a strong positive relationship between Overall Quality and Sale Price. Houses rated 9-10 (Excellent) command significantly higher prices than those rated 1-5 (Poor to Average). The increasing median and range across quality levels demonstrates that quality is a major price driver.
+</div>
+
+## Sale Price Distribution by Neighborhood
+
+```{r}
+ggplot(train_data_filtered, aes(x = Neighborhood, y = SalePrice)) +
+  geom_boxplot(fill = "lightgreen", color = "black") +
+  labs(title = "Sale Price Distribution by Neighborhood",
+       x = "Neighborhood",
+       y = "Sale Price (Log Scale)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+<div class="analysis-box">
+**Analysis:** Neighborhood location substantially impacts home prices in Ames. Premium neighborhoods show consistently higher median prices and tighter distributions, while more affordable neighborhoods display lower medians with greater variability. Location is clearly a critical factor in property valuation.
+</div>
+
+## Size-Price Relationship by Quality
+
+```{r}
+ggplot(train_data_filtered, aes(x = TotalSF, y = SalePrice, color = as.factor(OverallQual))) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Relationship Between Total Surface Area and Sale Price",
+         x = "Total Surface Area (TotalSF, normalized)",
+       y = "Sale Price (Log Scale)",
+       color = "Overall Quality") +
+  theme_minimal() +
+  scale_color_brewer(palette = "RdYlGn")
+```
+
+<div class="analysis-box">
+**Analysis:** This visualization reveals a clear positive correlation between total surface area and sale price, with quality ratings adding an additional dimension. Higher quality homes (green) cluster in the upper right, showing that both size and quality independently contribute to higher prices.
+</div>
+
+
+
+## Additional Visualization 1: Construction Year Impact
+
+```{r}
+ggplot(train_data_filtered, aes(x = YearBuilt, y = SalePrice)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  labs(title = "Impact of Construction Year on Sale Price",
+       x = "Year Built",
+       y = "Sale Price (Log Scale)") +
+  theme_minimal()
+```
+
+<div class="analysis-box">
+**Analysis:** A clear upward trend shows that newer homes typically sell for higher prices. The red LOESS curve reveals this relationship is approximately linear, with some acceleration for very recent constructions. Home age is evidently an important pricing factor. Note that Year Built datas are normalized.
+</div>
+
+## Additional Visualization 2: Number of Rooms vs. Sale Price
+
+```{r}
+ggplot(train_data_filtered, aes(x = TotRmsAbvGrd, y = SalePrice, 
+                                 color = as.factor(OverallQual))) +
+  geom_jitter(alpha = 0.6, width = 0.2) +
+  labs(title = "Number of Rooms Above Ground vs. Sale Price",
+       subtitle = "Colored by Overall Quality rating",
+       x = "Total Rooms Above Ground",
+       y = "Sale Price (Log Scale)",
+       color = "Overall Quality") +
+  theme_minimal() +
+  scale_color_brewer(palette = "RdYlGn")
+```
+
+<div class="analysis-box">
+**Analysis:** It’s hard to match the number of bedrooms with the sale price using this chart, so we won’t use it later.
+</div>
+
+---
+
+# Step 4: Modeling and Prediction
+
+<div class="instruction-box">
+**Instructions from Professor:**
+
+- Train a Multiple Linear Regression model as baseline using best features
+- Train a LASSO regression model for automatic feature selection
+- Train a Random Forest model
+- Evaluate model performance using multiple indicators and interpret important features
+</div>
+
+## Feature Selection for Modeling
+
+```{r}
+features <- c("SalePrice", "OverallQual", "GrLivArea", "GarageCars", "GarageArea",
+              "TotalBsmtSF", "X1stFlrSF", "FullBath", "TotRmsAbvGrd",
+              "YearBuilt", "YearRemodAdd", "GarageYrBlt")
+
+data_selected <- train_data_filtered %>% select(all_of(features))
+data_selected <- na.omit(data_selected)
+data_selected$LogSalePrice <- log(data_selected$SalePrice)
+
+cat("Selected", length(features)-1, "features for modeling\n")
+cat("Final dataset size:", nrow(data_selected), "observations\n")
+```
+
+<div class="analysis-box">
+**Analysis:** Based on correlation analysis, we selected 11 features representing quality metrics, size measurements, and temporal characteristics. These features capture the key drivers of home prices identified in our analysis.
+</div>
+
+## Model 1: Multiple Linear Regression
+
+```{r}
+model_lm <- lm(LogSalePrice ~ OverallQual + GrLivArea + GarageCars + GarageArea +
+                 TotalBsmtSF + X1stFlrSF + FullBath + TotRmsAbvGrd +
+                 YearBuilt + YearRemodAdd + GarageYrBlt,
+               data = data_selected)
+
+#summary(model_lm)
+```
+
+
+## Model 2: LASSO Regression
+
+```{r}
+Y <- log(data_selected$SalePrice)
+X <- as.matrix(data_selected %>% select(-SalePrice, -LogSalePrice))
+
+lasso_cv <- cv.glmnet(X, Y, alpha = 1, nfolds = 10)
+best_lambda <- lasso_cv$lambda.min
+
+#cat("Optimal lambda value:", best_lambda, "\n\n")
+
+lasso_model <- glmnet(X, Y, alpha = 1, lambda = best_lambda)
+#print(lasso_model)
+```
+
+
+## Model 3: Random Forest
+
+```{r}
+rf_model <- randomForest(
+  LogSalePrice ~ OverallQual + GrLivArea + GarageCars + GarageArea +
+    TotalBsmtSF + X1stFlrSF + FullBath + TotRmsAbvGrd +
+    YearBuilt + YearRemodAdd + GarageYrBlt,
+  data = data_selected,
+  ntree = 500,
+  mtry = 4,
+  importance = TRUE,
+  na.action = na.omit
+)
+
+#print(rf_model)
+```
+
+
+---
+
+# Model Evaluation and Comparison
+
+```{r}
+# Chargement le jeu de test filtré
+features <- c("SalePrice", "OverallQual", "GrLivArea", "GarageCars", "GarageArea",
+              "TotalBsmtSF", "X1stFlrSF", "FullBath", "TotRmsAbvGrd",
+              "YearBuilt", "YearRemodAdd", "GarageYrBlt")
+
+data_selected <- train_data_filtered %>% select(all_of(features))
+data_selected <- na.omit(data_selected)
+
+# Conversion de SalePrice en numérique
+data_selected$SalePrice <- as.numeric(data_selected$SalePrice)
+
+actual_prices <- log(data_selected$SalePrice)
+
+# Jeu de test pour la prédiction
+test_data <- data_selected %>% select(-SalePrice)
+
+# Fonction d’évaluation
+evaluate_model <- function(actual, predicted) {
+  data.frame(
+    RMSE = sqrt(mean((predicted - actual)^2)),
+    MAE  = mean(abs(predicted - actual)),
+    R2   = cor(actual, predicted)^2,
+    MAPE = mean(abs((predicted - actual) / actual)) * 100
+  )
+}
+
+# Modèle linéaire
+pred_lm <- exp(predict(model_lm, newdata = test_data)) 
+results_lm <- evaluate_model(exp(actual_prices), pred_lm)
+
+# Modèle LASSO
+pred_lasso <- exp(predict(lasso_model, s = best_lambda, newx = as.matrix(test_data)))  
+results_lasso <- evaluate_model(exp(actual_prices), pred_lasso)
+
+# Modèle Random Forest
+pred_rf <- exp(predict(rf_model, newdata = test_data)) 
+results_rf <- evaluate_model(exp(actual_prices), pred_rf)
+
+# Comparaison
+
+results_lm <- evaluate_model(exp(actual_prices), pred_lm)
+results_lasso <- evaluate_model(exp(actual_prices), pred_lasso)
+results_rf <- evaluate_model(exp(actual_prices), pred_rf)
+
+colnames(results_lasso) <- c("RMSE", "MAE", "R2", "MAPE")
+
+
+# Combiner dans un data.frame propre
+results <- data.frame(
+  Model = c("Linear_Regression", "LASSO", "Random_Forest"),
+  RMSE  = c(results_lm$RMSE, results_lasso$RMSE, results_rf$RMSE),
+  MAE   = c(results_lm$MAE, results_lasso$MAE, results_rf$MAE),
+  R2    = c(results_lm$R2, results_lasso$R2, results_rf$R2),
+  MAPE  = c(results_lm$MAPE, results_lasso$MAPE, results_rf$MAPE)
+)
+
+print(results)
+```
+
+<div class="analysis-box">
+**Overall Model Performance:**
+
+- **Random Forest** achieves the best performance with the lowest RMSE (`r round(results_rf$RMSE, 2)`) and highest R² (`r round(results_rf$R2, 4)`), capturing complex non-linear relationships
+- **LASSO** shows competitive performance with RMSE of `r round(results_lasso$RMSE, 2)`, benefiting from feature selection
+- **Linear Regression** provides a solid baseline with RMSE of `r round(results_lm$RMSE, 2)`
+
+The Random Forest model is recommended for deployment due to its superior predictive accuracy.
+</div>
+
+## Comparison Visualizations
+
+```{r fig.width=10, fig.height=6}
+# RMSE Comparison
+ggplot(results, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_col() +
+  geom_text(aes(label = round(RMSE, 2)), vjust = -0.5) +
+  labs(title = "Root Mean Squared Error (RMSE) Comparison",
+       subtitle = "Lower is better - measures average prediction error",
+       y = "RMSE ($)", x = "Model") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
+```
+
+<div class="analysis-box">
+**RMSE Analysis:** Random Forest shows the lowest RMSE, meaning its predictions deviate least from actual prices on average.
+</div>
+
+```{r fig.width=10, fig.height=6}
+# R² Comparison
+ggplot(results, aes(x = Model, y = R2, fill = Model)) +
+  geom_col() +
+  geom_text(aes(label = round(R2, 3)), vjust = -0.5) +
+  labs(title = "R² (Coefficient of Determination) Comparison",
+       subtitle = "Higher is better - proportion of variance explained",
+       y = "R²", x = "Model") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
+```
+
+<div class="analysis-box">
+**R² Analysis:** Random Forest explains `r round(results_rf$R2*100, 1)`% of price variance, demonstrating excellent predictive power. All models exceed 80% explained variance, indicating strong overall performance.
+</div>
+
+```{r fig.width=10, fig.height=6}
+# MAE Comparison
+ggplot(results, aes(x = Model, y = MAE, fill = Model)) +
+  geom_col() +
+  geom_text(aes(label = round(MAE, 2)), vjust = -0.5) +
+  labs(title = "Mean Absolute Error (MAE) Comparison",
+       subtitle = "Lower is better - average absolute prediction error",
+       y = "MAE ($)", x = "Model") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
+```
+
+<div class="analysis-box">
+**MAE Analysis:** MAE provides an interpretable metric, Random Forest predictions are off by approximately $`r format(round(results_rf$MAE, 0), big.mark=",")` on average, making it highly reliable for real-world pricing decisions.
+</div>
+
+```{r fig.width=10, fig.height=6}
+# MAPE Comparison
+ggplot(results, aes(x = Model, y = MAPE, fill = Model)) +
+  geom_col() +
+  geom_text(aes(label = paste0(round(MAPE, 2), "%")), vjust = -0.5) +
+  labs(title = "Mean Absolute Percentage Error (MAPE) Comparison",
+       subtitle = "Lower is better - average percentage prediction error",
+       y = "MAPE (%)", x = "Model") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
+```
+
+<div class="analysis-box">
+**MAPE Analysis:** With a MAPE of `r round(results_rf$MAPE, 2)`%, Random Forest provides predictions within `r round(results_rf$MAPE, 0)`% of actual sale prices on average, an excellent result for real estate valuation.
+</div>
+
+---
+
+# Conclusions and Recommendations
+
+With our work, we started with data and after research to determine each data point, we needed to clean, transform, and after that, test with different linear models to predict the price of houses.
+We learned during this project that it is important to have clean data and it's especially important to use the good data for linear models to predict results, in our case, the price of houses in Ames, Iowa. And when we compared different models and evaluated them, we used different accuracy metrics to select which one is better in our case. For us, and for our project, it's Random Forest; it has better performance than the others.<br><br>
+So, as we are analysts for a real estate agency, with our tool, in this case, our model that we have developed, our agency can use it to determine the price of a house by entering different information about the house features: "SalePrice", "OverallQual", "GrLivArea", "GarageCars", "GarageArea", "TotalBsmtSF", "X1stFlrSF", "FullBath", "TotRmsAbvGrd", "YearBuilt", "YearRemodAdd", "GarageYrBlt". We have determined that these features are the best to determine a probable price of a house.<br><br>
+In the future, we can develop an app or website to help real estate agents.
+
+---
